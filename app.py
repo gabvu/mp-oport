@@ -3,96 +3,99 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta
 import concurrent.futures
-import time  # <--- NUEVO: Necesario para los reintentos
+import time
 
-# Configuración de página
+# 1. Configuración de la interfaz
 st.set_page_config(page_title="Analizador Océanos Azules MP", layout="wide")
 st.title("🔍 Buscador de Océanos Azules: Consultorías Desiertas")
 st.markdown("Identifica licitaciones donde no hubo competencia para capturar nuevas oportunidades.")
 
-# Sidebar
+# 2. Panel Lateral (Sidebar)
 with st.sidebar:
     api_key = st.text_input("Ingresa tu API Ticket de Mercado Público", type="password")
     dias = st.selectbox("Periodo de búsqueda", [7, 14, 30])
-    st.info("Este proceso filtra específicamente procesos de Consultoría que terminaron sin adjudicación.")
+    st.info("Buscando procesos de Consultoría que terminaron sin adjudicación.")
 
+# 3. Función para obtener detalles de una licitación
 def fetch_detalle(id_licitacion, ticket):
-    """Obtiene el detalle de una licitación específica para ver el motivo de desierto."""
     url = f"https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json?codigo={id_licitacion}&ticket={ticket}"
     try:
-        r = requests.get(url, timeout=20) # Aumentamos un poco el timeout aquí también
-        data = r.json()
-        if data['Cantidad'] > 0:
-            lic = data['Listado'][0]
-            # Filtramos solo las que están desiertas o similares
-            if lic['Estado'] in ['Desierta', 'Revocada', 'Adjudicación Sin Ofertas', 'Desierto']:
-                return {
-                    "ID": lic['CodigoExterno'],
-                    "Nombre": lic['Nombre'],
-                    "Institucion": lic['Entidad']['Nombre'],
-                    "Estado": lic['Estado'],
-                    "Motivo": lic.get('JustificacionPublicacion', 'No especificado'),
-                    "Monto": lic.get('MontoEstimado', 'No disponible')
-                }
+        r = requests.get(url, timeout=25)
+        if r.status_code == 200:
+            data = r.json()
+            if data['Cantidad'] > 0:
+                lic = data['Listado'][0]
+                # Estados que definen un "Océano Azul" (Oportunidad desaprovechada)
+                estados_objetivo = ['Desierta', 'Revocada', 'Adjudicación Sin Ofertas', 'Desierto']
+                if lic['Estado'] in estados_objetivo:
+                    return {
+                        "ID": lic['CodigoExterno'],
+                        "Nombre": lic['Nombre'],
+                        "Institucion": lic['Entidad']['Nombre'],
+                        "Estado": lic['Estado'],
+                        "Motivo": lic.get('JustificacionPublicacion', 'No especificado'),
+                        "Monto": lic.get('MontoEstimado', 'No disponible')
+                    }
     except:
         return None
+    return None
 
-if st.button("Iniciar Extracción de Datos") and api_key:
-    with st.spinner(f"Analizando últimos {dias} días..."):
-        all_results = []
-        fechas = [(datetime.now() - timedelta(days=x)).strftime("%d%m%Y") for x in range(dias)]
-        
-        # --- SECCIÓN CORREGIDA CON REINTENTOS Y TIMEOUT ---
-        ids_a_consultar = []
-        for f in fechas:
-            url_lista = f"https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json?fecha={f}&ticket={api_key}"
-            
-            exito_fecha = False
-            reintentos = 2 # Si falla, lo intenta 2 veces más
-            
-            while reintentos >= 0 and not exito_fecha:
-                try:
-                    # Esperamos hasta 30 segundos por respuesta
-                    response = requests.get(url_lista, timeout=30)
-                    
-                    if response.status_code == 200:
-                        res = response.json()
-                        if 'Listado' in res and res['Listado'] is not None:
-                            for l in res['Listado']:
-                                # Filtro por rubro Consultoría
-                                if any(kw in l['Nombre'].lower() for kw in ['consultoria', 'asesoria', 'estudio']):
-                                    ids_a_consultar.append(l['CodigoExterno'])
-                        exito_fecha = True 
-                    elif response.status_code == 504:
-                        st.warning(f"Servidor saturado el día {f}. Reintentando en 3 segundos...")
-                        time.sleep(3)
-                        reintentos -= 1
-                    else:
-                        st.error(f"Error {response.status_code} en fecha {f}")
-                        break
-                except (requests.exceptions.Timeout, requests.exceptions.RequestException):
-                    st.warning(f"Tiempo de espera agotado en {f}. Reintentando...")
-                    reintentos -= 1
-                    time.sleep(2)
-        # --- FIN DE SECCIÓN CORREGIDA ---
+# 4. Lógica Principal al presionar el botón
+if st.button("Iniciar Extracción de Datos"):
+    if not api_key:
+        st.error("Por favor, ingresa tu API Ticket en la barra lateral.")
+    else:
+        with st.spinner(f"Analizando últimos {dias} días..."):
+            all_results = []
+            fechas = [(datetime.now() - timedelta(days=x)).strftime("%d%m%Y") for x in range(dias)]
+            ids_a_consultar = []
 
-        # 2. Consultar detalles en paralelo
-        if ids_a_consultar:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                future_to_id = {executor.submit(fetch_detalle, id_lic, api_key): id_lic for id_lic in ids_a_consultar}
-                for future in concurrent.futures.as_completed(future_to_id):
-                    res = future.result()
-                    if res:
-                        all_results.append(res)
+            # Fase 1: Recolectar IDs de licitaciones de Consultoría
+            for f in fechas:
+                url_lista = f"https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json?fecha={f}&ticket={api_key}"
+                intentos = 0
+                while intentos < 2:
+                    try:
+                        response = requests.get(url_lista, timeout=30)
+                        if response.status_code == 200:
+                            res = response.json()
+                            if 'Listado' in res and res['Listado']:
+                                for l in res['Listado']:
+                                    nombre = l['Nombre'].lower()
+                                    if any(kw in nombre for kw in ['consultoria', 'asesoria', 'estudio']):
+                                        ids_a_consultar.append(l['CodigoExterno'])
+                            break # Éxito, salimos del bucle de intentos
+                        elif response.status_code == 504:
+                            time.sleep(2)
+                            intentos += 1
+                        else:
+                            break
+                    except:
+                        intentos += 1
 
-        if all_results:
-            df = pd.DataFrame(all_results)
-            st.success(f"Se encontraron {len(df)} oportunidades potenciales.")
-            st.dataframe(df)
-            
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("Descargar Excel (CSV)", csv, "oceanos_azules.csv", "text/csv")
-        else:
-            st.warning("No se encontraron procesos desiertos en este rubro. Intenta con un rango mayor de días o revisa tu conexión.")
+            # Fase 2: Consultar detalles en paralelo para las licitaciones encontradas
+            if ids_a_consultar:
+                st.write(f"Procesando {len(ids_a_consultar)} posibles licitaciones...")
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = [executor.submit(fetch_detalle, id_lic, api_key) for id_lic in ids_a_consultar]
+                    for future in concurrent.futures.as_completed(futures):
+                        res = future.result()
+                        if res:
+                            all_results.append(res)
+
+            # Fase 3: Mostrar resultados
+            if all_results:
+                df = pd.DataFrame(all_results)
+                st.success(f"¡Éxito! Se encontraron {len(df)} oportunidades potenciales.")
+                st.dataframe(df)
+                
+                # Botón de descarga
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Descargar Océanos Azules (CSV)",
+                    data=csv,
+                    file_name=f"oportunidades_mp_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
             else:
-                st.warning(f"No se pudo obtener datos para la fecha {f} (Código {response.status_code})")
+                st.warning("No se encontraron licitaciones desiertas en el rubro de Consultoría para este periodo.")
