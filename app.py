@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 import concurrent.futures
 import time
 
-st.set_page_config(page_title="Analizador Océanos Azules MP", layout="wide")
-st.title("🔍 Buscador de Océanos Azules: Consultorías Desiertas")
+st.set_page_config(page_title="Búsqueda oportunidades de negocio", layout="wide")
+st.title("🔍 Buscador de Oportunidades: Consultorías Desiertas")
 
 with st.sidebar:
     api_key = st.text_input("Ingresa tu API Ticket de Mercado Público", type="password")
